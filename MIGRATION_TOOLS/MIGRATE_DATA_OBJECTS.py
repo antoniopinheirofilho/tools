@@ -13,7 +13,6 @@
 # source_database: Name of the database containing the table to be migrated
 # source_table: Name of the table to be migrated
 # target_location: Object storage location where data objects will be transferred to
-# Managed: True if this table should become managed in the target environment (Not used by this script)
 config_file_dbfs_location = dbutils.widgets.get("config_file_dbfs_location")
 
 # Table which will track the migration progress. It should be formatted as [db].[table]
