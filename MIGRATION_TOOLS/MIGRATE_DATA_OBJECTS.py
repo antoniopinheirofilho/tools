@@ -38,11 +38,14 @@ def exec_migrate_table(table, db_name, tracking_table):
     
     # describe the table (this will fail if table doesn't exist)
     try:
-        table_details = sql("describe extended {}.{}".format(db_name, table_name))
+        table_details = spark.sql("describe extended {}.{}".format(db_name, table_name))
     except:
         print("Error describing table {}.{}; please check and re-run.".format(db_name, table_name))
-        log_migration(tracking_table, db_name, target_location, table_name, None, -1, "describe error")
+        log_migration(tracking_table, db_name, target_location, table_name, None, None, None, -1, "describe error")
         return
+    
+    # Table type, whether it is managed or unmanaged
+    table_type = table_details.filter("col_name == 'Type'").collect()[0][1]
     
     # extract table details from describe statement
     provider = table_details.filter(table_details.col_name == "Provider").collect()[0][1]
@@ -55,14 +58,14 @@ def exec_migrate_table(table, db_name, tracking_table):
         
         # create the clone
         try:
-            sql("CREATE OR REPLACE TABLE {0}.{1} DEEP CLONE {0}.{2} LOCATION '{3}'".format(db_name, cloned_table_name, table_name, target_location))
+            spark.sql("CREATE OR REPLACE TABLE {0}.{1} DEEP CLONE {0}.{2} LOCATION '{3}'".format(db_name, cloned_table_name, table_name, target_location))
         except Exception as e:
             print("Error migrating table {}.{}; Exception: {}".format(db_name, table_name, str(e)))
-            log_migration(tracking_table, db_name, target_location, table_name, None, -1, str(e))
+            log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, None, -1, str(e))
             return
         
         # log migration
-        log_migration(tracking_table, db_name, target_location, table_name, cloned_table_name, 1, "success")
+        log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, cloned_table_name, 1, "success")
         
     elif provider.lower() in ["org.apache.spark.sql.parquet", "parquet"]:
         print("Moving table {}.{} to location {}".format(db_name,table_name,target_location))
@@ -71,11 +74,11 @@ def exec_migrate_table(table, db_name, tracking_table):
             spark.read.table("{}.{}".format(db_name, table_name)).write.format("parquet").mode("overwrite").save(target_location)
         except Exception as e:
             print("Error migrating table {}.{}; Exception: {}".format(db_name, table_name, str(e)))
-            log_migration(tracking_table, db_name, target_location, table_name, None, -1, str(e))
+            log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, None, -1, str(e))
             return
         
         # log migration
-        log_migration(tracking_table, db_name, target_location, table_name, None, 1, "success")
+        log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, None, 1, "success")
         
     elif provider.lower() in ["com.databricks.spark.csv", "csv"]:
         print("Moving table {}.{} to location {}".format(db_name,table_name,target_location))
@@ -84,17 +87,17 @@ def exec_migrate_table(table, db_name, tracking_table):
             spark.read.table("{}.{}".format(db_name, table_name)).write.format("csv").mode("overwrite").save(target_location)
         except Exception as e:
             print("Error migrating table {}.{}; Exception: {}".format(db_name, table_name, str(e)))
-            log_migration(tracking_table, db_name, target_location, table_name, None, -1, str(e))
+            log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, None, -1, str(e))
             return
         
         # log migration
-        log_migration(tracking_table, db_name, target_location, table_name, None, 1, "success")
+        log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, None, 1, "success")
         
     else:
         print("Found unknown provider {} for table {}.{}".format(provider,db_name,table_name))
-        log_migration(tracking_table, db_name, target_location, table_name, None, -1, "unknown provider")
+        log_migration(tracking_table, db_name, target_location, table_name, provider, table_type, None, -1, "unknown provider")
         
-def log_migration(tracking_table, db_name, target_location, table_name, cloned_table_name, status_code, reason):
+def log_migration(tracking_table, db_name, target_location, table_name, table_provider, table_type_at_source, cloned_table_name, status_code, reason):
     """
     Helper function to log migration status to the tracking table.
     """
@@ -108,7 +111,7 @@ def log_migration(tracking_table, db_name, target_location, table_name, cloned_t
     else:
         status = "unknown"
 
-    spark.sql(f"INSERT INTO TABLE {tracking_table} VALUES ('{db_name}','{table_name}', '{cloned_table_name}','{target_location}','{status}',{status_code},'{reason}')")
+    spark.sql(f"INSERT INTO TABLE {tracking_table} VALUES ('{db_name}','{table_name}', '{cloned_table_name}','{target_location}', '{table_provider}','{table_type_at_source}','{datetime.datetime.now()}','{status}',{status_code},'{reason}')")
 
 # COMMAND ----------
 
@@ -116,6 +119,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import itertools
 from pyspark.sql.functions import *
+import datetime;
 
 def migrate_databases(list_tables, tracking_table, parallelization):
     """
@@ -140,7 +144,7 @@ def migrate_databases(list_tables, tracking_table, parallelization):
             executor.map(exec_migrate_table, table_list, itertools.repeat(db_object.source_database), itertools.repeat(tracking_table))
             
     # print details of migration; see table below for full results
-    num_migrated_tables = sql("SELECT * FROM {} WHERE status_code = 1".format(tracking_table)).count()
+    num_migrated_tables = spark.sql("SELECT * FROM {} WHERE status_code = 1".format(tracking_table)).count()
     print("Migrated {} out of {} tables.".format(num_migrated_tables, total_tables))
     print("See table {} for details on migrated tables.".format(tracking_table))
 
@@ -149,6 +153,6 @@ def migrate_databases(list_tables, tracking_table, parallelization):
 list_tables = spark.read.format("csv").option("header", True).option("delimiter", ";").load(config_file_dbfs_location)
 
 # Create tracking table
-spark.sql(f"CREATE OR REPLACE TABLE {tracking_table} (db_name STRING, table_name STRING, cloned_table_name STRING, target_location STRING, status STRING, status_code INT, reason STRING)")
+spark.sql(f"CREATE OR REPLACE TABLE {tracking_table} (db_name STRING, table_name STRING, cloned_table_name STRING, target_location STRING, table_provider STRING, table_type_at_source STRING, timestamp TIMESTAMP, status STRING, status_code INT, reason STRING)")
 
 migrate_databases(list_tables, tracking_table, parallelization)
