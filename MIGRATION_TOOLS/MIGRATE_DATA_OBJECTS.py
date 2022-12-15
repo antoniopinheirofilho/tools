@@ -1,6 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC Based on https://demo.cloud.databricks.com/#notebook/12634129/command/12634130
+# MAGIC developed by antonio.pinheirofilho@databricks.com and wagner.silveira@databricks.com
 
 # COMMAND ----------
 
